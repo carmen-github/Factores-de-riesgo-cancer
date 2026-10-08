@@ -1,0 +1,696 @@
+---
+title: "Proyecto_RFCancer"
+author: "Carmen Sanchez Zapata"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    toc_depth: 2
+    theme: cosmo
+    highlight: tango
+---
+
+# **INTRODUCCIÓN**
+
+En este proyecto vamos a estudiar los factores de riesgo que pueden contribuir a la aparición de cancer y qué tipos. Empezaremos importando el fichero csv para ver la naturaleza de los datos de partida a las modificaciones de preprocesamiento que tenemos que hacer. Posteriormente, se seguirá estudiando la naturaleza de los datos mediante el uso de filtros para entender el comportamiento. 
+
+Finalmente, se entrenan y comparan modelos de aprendizaje supervisado basados en Random Forest, KNN y Árboles de Decisión (rpart). Para mitigar el fuerte desbalanceo en la variable de riesgo, se incorpora la técnica de sobremuestreo SMOTE, logrando una mejora sustancial en la sensibilidad de la clase
+
+
+# **RESUMEN**
+
+Este proyecto presenta un análisis integral de los factores de riesgo asociados a cinco tipos de cáncer (mama, pulmón, próstata, piel y colon) y la clasificación del nivel de riesgo del paciente utilizando un conjunto de datos simulado de 2000 registros clínicos con 21 atributos a estudiar. El flujo metodológico incluye un preprocesamiento riguroso con normalización Min-Max y codificación dummy. En la fase exploratoria, se aplican filtros lógicos basados en hipótesis clínicas y agrupamiento no supervisado mediante K-Means y Análisis de Componentes Principales (PCA). Finalmente, se entrenan y comparan modelos supervisados de Random Forest, KNN y Árboles de Decisión. Para resolver el severo desbalanceo de la variable de riesgo, se integra la técnica de sobremuestreo SMOTE, lo que permite corregir el sesgo del modelo y dotarlo de una sensibilidad real para la detección de pacientes en estado crítico.
+
+**SESION 1**
+
+```{r include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(fastDummies)
+library(caret)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(class)
+library(xgboost)
+library(themis) 
+library(factoextra)
+library(nnet)
+library(h2o)
+```
+
+
+
+```{r}
+data <- read.csv("cancer-risk-factors.csv")
+head(data)
+str(data)
+ls <- unique(data$Cancer_Type)
+print("Tipos de cancer a estudiar")
+ls
+```
+
+En los datos importados, vemos 21 variables con 2000 casos clínicos de pacientes.Dentro de los cancer a estudiar, nos centraremos en los cancer de mama, próstata, piel, colon y pulmón. Encontramos también la medida en la que afectan los factores genéticos y los estilos de vida. Podríamos dividir las variables en personales, alimentación y estilo de vida.
+
+Como **factores personales**, contemplamos las variables de edad (Age), género (Gender), índice de masa corporal (BMI) e historia familiar (Family_History)
+
+Como **factores alimentarios**, vemos la obesidad (Obesity), la dieta en carne roja (Diet_red_Meat), en procesados (Diet_Salted_Precossed), la alimentación a base de fruta y verduras (Fruit_Veg_Intake) y la ingesta de calcio (Calcium_Intake)
+
+Como **factores de estilo de vida**, vemos si el paciente es fumador (Smoking), bebe (Alcohol_Use), la actividad física (Physical_Activity), el gasto metabólico total (Physical_Activity_Level), la polución del aire (Air_pollution), los riesgos laborales del paciente (Occupational_Hazards), la mutación del gen BRCA (BRCA_Mutation), relacionado con el cancer de mama y la infección de Helicobacter Pilori (H_Pylori_Infection), enzima del estómago que puede estar íntimammente relacionada con el cancer de colon
+
+Encontramos también información adicional sobre el csv a tener en cuenta:
+
+-   Dentro del Risk_Level, encontramos 'Low', 'Medium' y 'High'. Determinaremos 'Low' cuando el 'Overall_Risk_Score' sea inferior a 0.33; 'Medium' cuando sea mayor o igual de 0.33 y menor de 0.66 y 'High' cuando el valor mayor o igual a 0.66
+-   En Gender, se expresa en forma de 0 cuando es femenino y 1 cuando es masculino.
+
+------------------------------------------------------------------------
+
+# **PREPRPOCESAMIENTO**
+
+Comenzaremos transformando las variables numéricas a valores de rango [0,1]
+
+```{r}
+summary(data)
+colSums(is.na(data))
+
+```
+
+Esto demuestra que no tenemos datos faltantes
+
+**SESIÓN 2**
+
+Comenzamos normalizando nuestras variables
+
+```{r}
+
+min_max_norm <- function(x) {
+  if (max(x, na.rm = TRUE) - min(x, na.rm = TRUE) == 0) return(x)
+  return((x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)))
+}
+
+data_num <- data %>%
+  mutate(across(where(is.numeric), min_max_norm))
+
+df <- dummy_cols(
+  data_num,
+  select_columns = "Cancer_Type",
+  remove_first_dummy = FALSE,
+  remove_selected_columns = TRUE
+)
+
+
+head(df)
+```
+
+# **FILTROS**
+
+Haremos a continuación algunos estudios para tratar los datos más en profundidad. Primero es necesario saber con cuántos casos de cada cancer contamos
+
+```{r}
+vars <- c("Cancer_Type_Skin", "Cancer_Type_Breast", "Cancer_Type_Lung",
+          "Cancer_Type_Prostate", "Cancer_Type_Colon")
+
+sapply(df[vars], function(x) sum(x == 1, na.rm = TRUE))
+
+```
+
+```{r}
+#Filtramos los valores personales: edad mayor a 40 años, BMI mayor que la media y la historia familiar a 1
+var <- data %>%
+  filter(Age >= 40, BMI >= mean(BMI), Family_History == 1)
+#Nos devuelve 208 casos de pacientes con cancer que cumplen estas condiciones. Supone poco más del 10% de nuestros datos. Veremos a continuación si estas condciones determinan un riesgo alto, bajo o medio de cancer
+
+
+data %>%
+  filter(Age >= 40, BMI >= mean(BMI), Family_History == 1)%>%
+ggplot(aes(x=1,y=Overall_Risk_Score))+
+  geom_boxplot()
+
+```
+
+Viendo en la media y los cuartiles de los datos personales, los riesgos de cancer son 'Medium'. No sería concluyente pero podríamos desarrollar una hipótesis que los facotres personales generan un riesgo medio de cancer
+
+Filtraremos ahora los facotres alimentarios:
+
+```{r}
+#Filtramos los valores alimentarios: la obesidad, la dieta en carne roja, la alimentación a base de procesados, la ingesta de frutas y de verduras y la ingesta de calcio mayor que la media. De esta manera, podemos ver si una alimantación excesiva puede afectar
+
+alimentacion <- data_num %>%
+  filter(Obesity >= mean(Obesity), Diet_Red_Meat >= mean (Diet_Red_Meat), Diet_Salted_Processed >= mean(Diet_Salted_Processed), Fruit_Veg_Intake >= mean(Fruit_Veg_Intake),
+         Calcium_Intake >= mean(Calcium_Intake))
+
+#Vamos a hacer también un estudio donde veremos la obesidad, la dieta en carne roja y procesados
+
+alimentacion2 <- data_num %>%
+  filter(Obesity >= mean(Obesity), Diet_Red_Meat >= mean (Diet_Red_Meat), Diet_Salted_Processed >= mean(Diet_Salted_Processed))
+
+table(alimentacion$Cancer_Type)
+table(alimentacion2$Cancer_Type)
+
+```
+
+Para el filtro alimenticio de todos los componenetes, no encontramos más resultados que 53 (5+24+11+6+7). Vemos que, aunque por poca diferenica, destaca en el cancer de colon. Sin embargo, cuando reducimos la búsqueda a solo 3 componentes, encontramos 254 casos que supone el 12.7% de los casos. No encontramos relación clara con el cancer de colon pero es cierto que hay 116 casos en comparación con el primero que serían 53.
+
+Con este filtro, podemos sospechar que los algortimos de aprendizaje supervisado tendrán más facilidad a la hora de la predicción si se consideran pocas variables.
+
+```{r}
+summary(alimentacion2$Overall_Risk_Score)
+
+alimentacion2 %>%
+ggplot(aes(x=1,y=Overall_Risk_Score))+
+  geom_boxplot()
+
+```
+
+Esta caja de bigotes si muestra los valores ligeramente desplazados (aunque mínimo) hacia un riesgo Medio - Alto. Buscaremos ahora relación entre el cancer de colon y la obesidad o la dieta en carne roja y procesados o la ingesta de calcio
+
+```{r}
+count(df %>%
+  filter(Obesity > 0, Cancer_Type_Colon==1))
+
+count(df %>%
+  filter(Diet_Red_Meat >= quantile(Diet_Red_Meat), Diet_Salted_Processed >= quantile(Diet_Salted_Processed), Cancer_Type_Colon==1))
+
+count(df %>%
+  filter(Calcium_Intake >= mean(Calcium_Intake), Cancer_Type_Colon==1))
+
+```
+
+En el primer caso, vemos que el cancer de colon y la obesidad (da igual el valor siempre que exista obesidad) nos devuelven 384 casos relacionados, un % de los casos totales estudiados. Considerando que tenemos 418 casos de cancer de colon, este resultado es una cantidad bastante elevada. Por otro lado, la dieta en carne roja y procesados nos devuelve 271 casos relacionados con el cancer de colon, un 13.55% del total y un 64.83% del total de cancer de colon. Por último, la ingesta de Calcio por encima de la media nos devuelve 244 casos relacionados con este cancer, un 12.2% del total y un 58.37% de este tipo de cancer
+
+Respecto a los factores de estilo de vida, atenderemos distintas situaciones como la mutación del gen BRCA con el cancer de mama, el nivel de tabaco y la polución del aire con el cancer de pulmón, el nivel metabólico y el nivel de alcohol con el cancer de próstata, la actividad física, la obesidad y la infección de la Helicobacter Pilori con el cancer de colon, el tabaco y los riesgos laborales con el cancer de piel
+
+```{r}
+count(df %>%
+  filter(BRCA_Mutation > 0, Cancer_Type_Breast==1))
+
+pulmon <- df %>%
+  filter(Smoking >0, Air_Pollution >= 0, Cancer_Type_Lung==1)
+count(pulmon)
+summary(pulmon$Overall_Risk_Score)
+
+count(df %>%
+  filter(Physical_Activity_Level < mean(Physical_Activity_Level), Alcohol_Use >= mean(Alcohol_Use), Cancer_Type_Prostate==1))
+
+count(df %>%
+  filter(Physical_Activity < quantile(Physical_Activity), Obesity > 0, H_Pylori_Infection ==1, Cancer_Type_Colon==1))
+
+count(df %>%
+  filter(Smoking > 0, Occupational_Hazards >= 0.5, Cancer_Type_Skin==1))
+
+```
+
+Estos resultados no son muy determinantes excepto dos casos: 
+
+- En la relación entre el cancer de pulmón y el tabaco y la polución del aire encontramos los 527 casos existentes. Es cierto que los filtros son básicos ya que hemos considerado que si el paciente fuma (da igual la medida) y/o hay polución en al aire (ignoramos el nivel de polución), existe cancer de pulmón 
+
+-   En la relación con el tabaco, los riesgos laborales y el cancer de piel, encontramos 230 resultados, considerando que contamos con 290 casos de este tipo de cancer, lo que supone un 79.31% de casos
+
+**SESIÓN 3**
+
+# **APRENDIZAJE NO SUPERVISADO** 
+## **Algortimo K-Means**
+
+Vamos a llevar a cabo un clustering de tipo K-means
+
+```{r}
+df_num <- df[, sapply(df, is.numeric)]
+vector_compactacion <- numeric(15)
+
+for(i in 1:15){
+  km_datos <- kmeans(df_num, centers = i, nstart = 20)
+  vector_compactacion[i] <- km_datos$tot.withinss
+}
+
+# Grafica
+par(mfrow=c(1,1))
+plot(1:15, vector_compactacion, type = "b",
+     xlab = "Número de clusters",
+     ylab = "Compactación (tot.withinss)",
+     main = "Método del Codo")
+
+```
+
+El método del codo nos devuelve un valor de K=4, ya que la curva baja considerablemente hasta este valor. Estudiaremos también con un valor de k=5, que coincide con el número de cancer que estudiamos.
+
+```{r}
+
+km_datos<-kmeans(df_num,center=4,nstar=20) #segun el metodo del codo
+cat('Breast')
+print(table(km_datos$cluster, df$Cancer_Type_Breast))
+##################
+cat('Lung')
+print(table(km_datos$cluster, df$Cancer_Type_Lung))
+##################
+cat('Prostate')
+print(table(km_datos$cluster, df$Cancer_Type_Prostate))
+##################
+cat('Skin')
+print(table(km_datos$cluster, df$Cancer_Type_Skin))
+##################
+cat('Colon')
+print(table(km_datos$cluster, df$Cancer_Type_Colon))
+```
+
+```{r}
+############# 
+
+km_datos2<-kmeans(df_num,center=5,nstar=20) #numero de cancer
+
+cat('Breast')
+print(table(km_datos2$cluster, df$Cancer_Type_Breast))
+##################
+cat('Lung')
+print(table(km_datos2$cluster, df$Cancer_Type_Lung))
+##################
+cat('Prostate')
+print(table(km_datos2$cluster, df$Cancer_Type_Prostate))
+##################
+cat('Skin')
+print(table(km_datos2$cluster, df$Cancer_Type_Skin))
+##################
+cat('Colon')
+print(table(km_datos2$cluster, df$Cancer_Type_Colon))
+```
+
+Vemos que obtenemos los mismos resultados de clustering para k=4 y k=5. Vamos a ver si funciona igual para el dataframe sin la variable de cancer separada (sin el dummies).
+
+```{r}
+df_num2 <- data_num[, sapply(data_num, is.numeric)]
+vector_compactacion <- numeric(15)
+
+for(i in 1:15){
+  km_datos3 <- kmeans(df_num2, centers = i, nstart = 20)
+  vector_compactacion[i] <- km_datos3$tot.withinss
+}
+
+# Grafica
+par(mfrow=c(1,1))
+plot(1:15, vector_compactacion, type = "b",
+     xlab = "Número de clusters",
+     ylab = "Compactación (tot.withinss)",
+     main = "Método del Codo")
+
+
+```
+
+```{r}
+km_datos3<-kmeans(df_num,center=2,nstar=20) #segun el metodo del codo
+cat('Breast')
+print(table(km_datos3$cluster, data_num$Cancer_Type=="Breast"))
+##################
+cat('Lung')
+print(table(km_datos3$cluster, data_num$Cancer_Type=="Lung"))
+##################
+cat('Prostate')
+print(table(km_datos3$cluster, data_num$Cancer_Type=="Prostate"))
+##################
+cat('Skin')
+print(table(km_datos3$cluster, data_num$Cancer_Type=="Skin"))
+##################
+cat('Colon')
+print(table(km_datos3$cluster, data_num$Cancer_Type=="Colon"))
+```
+
+Vemos que este clustering, para el Cancer de mama, separa un cluster con 455 resultados positivos y otro con 5 resultados. Vemos que hay 5 casos donde el algortimo no distitngue bien. En el cancer de pulmón, separa los casos positivos en dos grupos. En el cancer próstata distingue correctamente de un paciente positivo y negativo pero en los cancer de piel y colon no. Por tanto, es mejor continuar con el dataframe que contiene la variable de tipo de cancer separado
+
+# **APRENDIZAJE SUPERVISADO**
+
+## **Modelo predictivo**
+
+En esta sección, entrenaremos dos modelos de Random Forest: uno para clasificar el tipo de cáncer y otro para predecir el nivel de riesgo del paciente.
+
+### **Random Forest**
+
+```{r}
+# Para Tipo de Cáncer usamos la variable original Cancer_Type
+data_tipo <- data_num %>% select(-Overall_Risk_Score, -Risk_Level, -Patient_ID) #quitamos de las variables tambien el Patient_ID ya que no nos interesa asociar un cancer a un paciente
+data_tipo$Cancer_Type <- as.factor(data_tipo$Cancer_Type)
+
+# Para Nivel de Riesgo (Clasificación)
+data_riesgo <- data_num %>% select(-Cancer_Type, -Overall_Risk_Score, -Patient_ID)
+data_riesgo$Risk_Level <- factor(data_riesgo$Risk_Level, levels = c("Low", "Medium", "High"))
+
+# Partición (usamos la misma semilla para que sea reproducible)
+set.seed(123)
+idx <- createDataPartition(data_tipo$Cancer_Type, p = 0.8, list = FALSE)
+
+train_tipo <- data_tipo[idx, ]
+test_tipo  <- data_tipo[-idx, ]
+
+train_riesgo <- data_riesgo[idx, ]
+test_riesgo  <- data_riesgo[-idx, ]
+```
+
+```{r}
+# Modelo 1: Predicción de Tipo de Cáncer
+mod_cancer <- randomForest(Cancer_Type ~ ., data = train_tipo, ntree = 500, importance = TRUE)
+
+# Modelo 2: Predicción de Nivel de Riesgo
+mod_riesgo <- randomForest(Risk_Level ~ ., data = train_riesgo, ntree = 500, importance = TRUE)
+
+print(mod_cancer)
+print(mod_riesgo)
+```
+
+En la tabla de confusión de predicción de tipo de cancer, vemos que las variables de cancer tienen un error bajo excepto el cancer de piel, que roza el 50%. Por otro lado, los errores en la predicción del riesgo si son altos. Es cierto que el riesgo Medio es fácil de identificar al tener mucho más volumen datos. Sin embargo, el riesgo Alto, al haber mucho menos datos, no es efectiva la predicción.
+
+```{r}
+# Predicciones
+pred_cancer <- predict(mod_cancer, test_tipo)
+pred_riesgo <- predict(mod_riesgo, test_riesgo)
+
+# Evaluación del modelo de Tipo de Cáncer
+cat("--- Evaluación: Tipo de Cáncer ---\n")
+confusionMatrix(pred_cancer, test_tipo$Cancer_Type)
+
+# Evaluación del modelo de Nivel de Riesgo
+cat("\n--- Evaluación: Nivel de Riesgo ---\n")
+confusionMatrix(pred_riesgo, test_riesgo$Risk_Level)
+```
+
+Una vez hechas las predicciones y evaluadas, en la predicción del tipo de cancer encontramos una precisión del 75.94% y una precisión balanceada entre el 70 y 85%. Atendiendo a la sensibilidad, encontramos valores más bajos de los demás en el cancer de piel y colon,
+
+En la predicción del riesgo, encontramos una precisión del 83.71%. Sin embargo, no indica la eficiencia del algoritmo, ya que, debido al alto número de riesgo Medio, aumenta la preicisón. Sin embargo, la sensibilidad del riesgo 'Alto' es 0 y su precisión balanceada es de 0,5. A continuación, probaremos el algortimo seleccionando las variables más determinantes
+
+#### Variables determinantes
+
+```{r}
+# Configuración del entrenamiento con SMOTE
+ctrl_rf <- trainControl(
+  method = "cv", 
+  number = 5, 
+  sampling = "smote" # Balanceo automático
+)
+
+set.seed(123)
+# Entrenamos el modelo balanceado
+mod_rf_bal_cancer <- train(
+  Cancer_Type ~ ., 
+  data = train_tipo, 
+  method = "rf", 
+  trControl = ctrl_rf,
+  importance = TRUE,
+  ntree = 250 # Reducimos un poco para agilizar el proceso
+)
+
+imp_rf_cancer <- varImp(mod_rf_bal_cancer)
+plot(imp_rf_cancer, top = 10, main = "Variables Clave (RF Balanceado)")
+
+
+```
+
+Vamos como en el cancer de piel, muchas variables tienen más de un 40% de importancia. De ahí la complejidad para el aprendizaje del algrotimo. Sin embargo, otros tipo de cancer como el cancer de piel, solo 3 variables superan el 40% de importancia, por lo que es facil determinarse. Se podría generar una predicción para cada tipo de cancer con las variables con mayor peso de decisión para cada tipo
+
+```{r}
+# Evaluación
+pred_rf_bal_cancer <- predict(mod_rf_bal_cancer, test_tipo)
+confusionMatrix(pred_rf_bal_cancer, test_tipo$Cancer_Type)
+```
+La precisión en este modelo ha bajado pequeñas centésimas mrespectoa  la táctica anterior. Sin embargo, la precisión balanceada es mucho mejor. Probaremos a continuación generar una predicción para cada tipo de cancer con las variables con mayor peso de decisión para cada tipo
+
+
+```{r}
+ctrl_rf <- trainControl(
+  method = "cv", 
+  number = 5, 
+  sampling = "smote" # Balanceo automático
+)
+
+set.seed(123)
+
+mod_rf_bal_riesgo <- train(
+  Risk_Level ~ ., 
+  data = train_riesgo, 
+  method = "rf", 
+  trControl = ctrl_rf,
+  importance = TRUE,
+  ntree = 250 # Reducimos un poco para agilizar el proceso
+)
+
+imp_rf_riesgo <- varImp(mod_rf_bal_riesgo)
+plot(imp_rf_riesgo, top = 10, main = "Variables Clave (RF Balanceado) para la predicción de riesgo")
+```
+
+En este caso es bastante sorprendente ya en el resigo Medio, las variables tiene practicamente todas el mismo peso y con una importancia bastante baja. Esto se debe a la gran cantidad de datos de Riesgo Medio que encontramos, que hace que es desbalanceado. En el riesgo Bajo no encontramos ningún resultado concluyente y sin embargo, en el riesgo Alto, vemos que destacan princiaplmente tres variables por encima del 50%. Estos son Air_pullion, Alcohol_Use y Diet_Salted_Processed-
+
+```{r}
+# Evaluación
+pred_rf_bal_riesgo <- predict(mod_rf_bal_riesgo, test_riesgo)
+confusionMatrix(pred_rf_bal_riesgo, test_riesgo$Risk_Level)
+```
+En esta predicción, encontramos resultados mucho más positivos. Vemos una precisión del 82.96%, la precisión balanceada sube en las clases 'Baja' y 'Alta' y la sensibilidad de la clase 'Alta' ha subido de 0 a 39.13%
+
+
+
+### **KNN**
+
+```{r}
+
+# Excluimos Cancer_Type y cualquier columna que no sea número. Las que quitamos serán Risk_Level (que podemos seguir obtiendo resultado mediante Overall_Risk_Level)y Patient_ID, que en este momento no nos interesa
+train_x <- train_tipo %>% 
+  select(where(is.numeric)) %>%
+  select(-starts_with("Cancer_Type_"))
+
+test_x <- test_tipo %>% 
+  select(where(is.numeric)) %>%
+  select(-starts_with("Cancer_Type_"))
+
+train_y <- as.factor(train_tipo$Cancer_Type)
+
+
+```
+
+
+
+```{r}
+train_knn_final <- train_x
+train_knn_final$Cancer_Type <- train_y
+
+# Búsqueda automática de la mejor K
+set.seed(123)
+modelo_knn_auto <- train(Cancer_Type ~ ., 
+                         data = train_knn_final, 
+                         method = "knn",
+                         tuneLength = 15,
+                         trControl = trainControl(method = "cv"))
+
+plot(modelo_knn_auto)
+```
+
+En esta gráfica podemos observar como aumenta la precisión a medida que el caso es comparado con un k mayor de vecinos. Como vemos que la gráfica tiene un pico alrededor de 18-19 vecinos. Consideraremos esa la k óptima. Probaremos con 18
+
+```{r}
+pred_knn_manual <- knn(train = train_x, 
+                       test = test_x, 
+                       cl = train_y, 
+                       k = 18)
+
+# Evaluación
+cat("\n--- Evaluación KNN: Tipo de cancer de manera manual ---\n")
+confusionMatrix(pred_knn_manual, test_tipo$Cancer_Type)
+```
+
+Vemos una precisión del 67.67% pero sigue sin ser mejor que la de RandomForest. Veremos ahora la evaluación del riesgo
+
+```{r}
+# Preparar datos para Riesgo
+train_riesgo_x <- train_riesgo %>% select(where(is.numeric))
+test_riesgo_x  <- test_riesgo %>% select(where(is.numeric))
+train_riesgo_y <- train_riesgo$Risk_Level
+
+# Ejecutar KNN para Riesgo (k=12 por ejemplo)
+pred_knn_riesgo <- knn(train = train_riesgo_x, 
+                       test = test_riesgo_x, 
+                       cl = train_riesgo_y, 
+                       k = 12)
+
+# Evaluación
+cat("\n--- Evaluación KNN: Nivel de Riesgo ---\n")
+confusionMatrix(pred_knn_riesgo, test_riesgo$Risk_Level)
+```
+
+Esta precisión es bastante mejor. Sin embargo, la precisión balanceada de la clase High roza el 60% y ninguna de las 3 siguen sin ser muy altas, aunque hayan mejorado respecto al algoritmo anterior. Probaremos otros algoritmos a ver si pudiésemos mejorar la predicción. No obstante, tener un valor de k tan bajo hace que la predicción sea muy inestable y en el ámbito médico en el que trabajamos, centrarnos en solo tres factores es peligroso, ya que no se consideran pacientes con patologías poco comunes.
+
+```{r}
+datos_solo_numeros <- train_riesgo %>% 
+  select(where(is.numeric)) 
+
+res_pca <- prcomp(datos_solo_numeros, scale. = TRUE)
+
+fviz_pca_ind(res_pca,
+             geom.ind = "point", 
+             col.ind = train_riesgo$Risk_Level, 
+             palette = c("green", "orange", "#FC4E07"),
+             addEllipses = TRUE, 
+             title = "Análisis de Componentes Principales (PCA)")
+```
+
+### **Árbol de decisión**
+
+Predicción de tipos de cancer
+
+```{r}
+set.seed(123)
+
+# Dataset para tipo de cáncer
+data_tipo <- data_num %>%
+  select(-Overall_Risk_Score, -Risk_Level, -Patient_ID)
+data_tipo$Cancer_Type <- as.factor(data$Cancer_Type)
+
+# División train/test
+idx <- createDataPartition(data_tipo$Cancer_Type, p = 0.8
+                           , list = FALSE)
+train_tipo <- data_tipo[idx, ]
+test_tipo  <- data_tipo[-idx, ]
+
+# Entrenamiento con control para evitar sobrecarga de CPU
+ctrl <- trainControl(method = "cv", number = 10, sampling = "smote")
+
+modelo_arbol <- train(
+  Cancer_Type ~ ., 
+  data = train_tipo,
+  method = "rpart",
+  trControl = ctrl,
+  tuneLength = 8
+)
+
+# Resultados
+print(modelo_arbol)
+rpart.plot(modelo_arbol$finalModel)
+
+
+
+```
+
+```{r}
+# Evaluación
+pred_arbol <- predict(modelo_arbol, test_tipo)
+confusionMatrix(pred_arbol, test_tipo$Cancer_Type)
+
+resultado_evaluacion <- confusionMatrix(pred_arbol, test_tipo$Cancer_Type)
+cat("El Accuracy del modelo de Árbol de Decisión es:", resultado_evaluacion$overall['Accuracy'], "\n")
+```
+
+```{r}
+importancia_cancer <- varImp(modelo_arbol)
+
+tabla_importancia <- importancia_cancer$importance
+
+plot(importancia_cancer, 
+     main = "Variables que más influyen en el tipo de cancer",
+     col = "pink")
+
+
+eliminadas <- tabla_importancia[tabla_importancia$Overall < 20, , drop=FALSE]
+
+print("Variables con importancia menor a 20")
+print(eliminadas)
+```
+En este gráfico vemos las variables que más influyen en la decisión del tipo de cancer. Podríamos probar realizar el algoritmo solo con las que suponen un 20% ya que, vemos que hay variables que no tienen efecto sobre la decisión
+
+```{r}
+set.seed(123)
+
+# Dataset para tipo de cáncer
+data_tipo2 <- data_num %>%
+  select(-Overall_Risk_Score, -Risk_Level, -Patient_ID) %>%
+  select(-all_of(rownames(eliminadas)))
+
+data_tipo2$Cancer_Type <- as.factor(data$Cancer_Type)
+
+# División train/test
+idx <- createDataPartition(data_tipo2$Cancer_Type, p = 0.8
+                           , list = FALSE)
+train_tipo2 <- data_tipo2[idx, ]
+test_tipo2  <- data_tipo2[-idx, ]
+
+# Entrenamiento con control para evitar sobrecarga de CPU
+ctrl2 <- trainControl(method = "cv", number = 10, sampling = "smote")
+
+modelo_arbol_var <- train(
+  Cancer_Type ~ ., 
+  data = train_tipo2,
+  method = "rpart",
+  trControl = ctrl2,
+  tuneLength = 10
+)
+
+rpart.plot(modelo_arbol_var$finalModel)
+
+```
+
+```{r}
+pred_arbol_var <- predict(modelo_arbol_var, test_tipo2)
+confusionMatrix(pred_arbol_var, test_tipo2$Cancer_Type)
+pred_arbol_var <- predict(modelo_arbol_var, test_tipo2)
+
+resultado_evaluacion2 <- confusionMatrix(pred_arbol_var, test_tipo2$Cancer_Type)
+cat("El Accuracy del modelo de Árbol de Decisión con variables truncadas es:", resultado_evaluacion2$overall['Accuracy'], "\n")
+print(resultado_evaluacion2)
+```
+
+
+
+Árbol de decision para el riesgo
+
+```{r}
+data_reg <- data_num %>% 
+  select(-Patient_ID, -Cancer_Type, -Overall_Risk_Score)
+
+set.seed(123)
+idx_reg <- createDataPartition(data_reg$Risk_Level, p = 0.8, list = FALSE)
+train_reg <- data_reg[idx_reg, ]
+test_reg  <- data_reg[-idx_reg, ]
+
+modelo_risk <- train(
+  Risk_Level ~ ., 
+  data = train_reg,
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 10)
+)
+rpart.plot(modelo_risk$finalModel, 
+           main = "Predicción de Risk Level",
+           type = 4, 
+           extra = 1, 
+           under = TRUE, 
+           cex = 0.7)
+
+pred_riesgo <- predict(modelo_risk, test_reg)
+```
+```{r}
+pred_riesgo <- predict(modelo_risk, test_reg)
+niveles <- c("Low", "Medium", "High")
+
+pred_riesgo_factor <- factor(pred_riesgo, levels = niveles)
+test_reg_real      <- factor(test_reg$Risk_Level, levels = niveles)
+
+resultado_evaluacion2 <- confusionMatrix(pred_riesgo_factor, test_reg_real)
+
+cat("El Accuracy del modelo de Árbol de Decisión con variables truncadas es:", 
+    resultado_evaluacion2$overall['Accuracy'], "\n")
+
+print(resultado_evaluacion2)
+```
+
+
+
+## CONCLUSIÓN
+
+- **Enfoque No Supervisado:** El algoritmo K-Means y el PCA demuestran que, al mantener las etiquetas de diagnóstico, es fácil aislar patologías específicas como el cáncer de mama o próstata (con K=4). Hemos visto que al agrupar con el mismo número de clusters que de tipos de cancer, se ajusta muy bien en el diagnóstiov. Sin embargo, nos sigue demostrando que se deben tener en cuenta muchas más variables para tener una precisión más exacta
+
+- **Predicción del Tipo de Cáncer:** El modelo Random Forest con balanceo SMOTE ofrece el mejor rendimiento global, con una preisión del 75%, superando la rigidez del Árbol de Decisión simple y el KNN con 67.67%. La evaluación del impacto de variables con `varImp` supuso un punto clave para detectar qué variables aportan "ruido"; al eliminarlas y truncar el modelo rpart, se consiguió optimizar la estructura del árbol sin pérdidas drásticas de precisión.
+
+- **Predicción del Nivel de Riesgo:** Este es el punto más crítico del estudio. Los modelos iniciales de Random Forest y Árboles de Decisión reflejaban un éxito aparente del 83%, pero con una sensibilidad del 0% para la clase High, debido a que el dataset está masivamente sesgado hacia la clase Medium. La introducción del algoritmo SMOTE permitió entrenar el Random Forest Balanceado que elevó la sensibilidad de la clase High al 39.13%. 
+
+
+Para estudios futuros y tener una mejor precisión, sería recomendable aumentar el número de casos con riesgo alto para que el dataset sea más balanceado. Además, sería tmabién muy util tomar datos más exactos como el componente genético del árbol genealógico, posibles trastornos mentales, el tipo de ejercicio que conlleva la actividad física... Sería mucho más claro para el médico entender la toma de decisión del algortimo y evitar así la caja negra.
+
+
+**BIBLIOGRAFÍA**
+
+Origen de los datos: Dataset público "cancer-risk-factors.csv"`. Repositorio de factores de riesgo y registros clínicos oncológicos en Kaggle
+https://www.kaggle.com/datasets/tarekmasryo/cancer-risk-factors-dataset
+
